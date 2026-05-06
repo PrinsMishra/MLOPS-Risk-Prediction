@@ -69,7 +69,7 @@ pipeline {
                     // Retries every 5 seconds for 1 minute
                     sh '''
                     count=0
-                    until $(curl --output /dev/null --silent --head --fail http://localhost:8000/health); do
+                    until $(curl --output /dev/null --silent --fail http://localhost:8000/health); do
                         if [ $count -eq 12 ]; then
                           echo "TIMEOUT: API failed to become healthy."
                           exit 1
