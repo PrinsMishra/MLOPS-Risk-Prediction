@@ -2,51 +2,128 @@ pipeline {
     agent any
 
     stages {
-        stage('Checkout Code') {
+        stage('1. Checkout Code') {
             steps {
                 checkout scm
             }
         }
 
-        stage('Python Setup & Retraining') {
+        stage('2. Setup Python Environment') {
             steps {
                 dir('layoff-risk-prediction') {
-                    script {
-                        echo "Setting up Python environment and running retraining gate..."
-                        sh '''
-                        # Create and activate virtual environment
-                        python3 -m venv venv || true
-                        . venv/bin/activate
-                        pip install -r requirements.txt
-                        
-                        # Run the retraining script
-                        python scripts/retrain_pipeline.py --data mlops-dataset-layoff-risk/tech_layoffs_2025_2026.csv --models-dir models
-                        '''
-                    }
+                    sh '''
+                    python3 -m venv venv || true
+                    . venv/bin/activate
+                    pip install -r requirements.txt
+                    '''
                 }
             }
         }
 
-        stage('Build Docker Images') {
+        stage('3. Retrain Model') {
             steps {
                 dir('layoff-risk-prediction') {
-                    script {
-                        echo "Building Docker images to verify build health..."
-                        sh '''
-                        docker-compose build
-                        '''
-                    }
+                    sh '''
+                    . venv/bin/activate
+                    python scripts/retrain_pipeline.py --data mlops-dataset-layoff-risk/tech_layoffs_2025_2026.csv --models-dir models
+                    '''
                 }
+            }
+        }
+
+        stage('4. Validate Model') {
+            steps {
+                dir('layoff-risk-prediction') {
+                    sh '''
+                    if [ -f "models/layoff_risk_model.keras" ]; then
+                        echo "✅ Model artifact found. Validation successful."
+                    else
+                        echo "❌ Model artifact missing!"
+                        exit 1
+                    fi
+                    '''
+                }
+            }
+        }
+
+        stage('5. Build Docker Images') {
+            steps {
+                dir('layoff-risk-prediction') {
+                    sh 'docker-compose build'
+                }
+            }
+        }
+
+        stage('6. Deploy Containers') {
+            steps {
+                dir('layoff-risk-prediction') {
+                    sh 'docker-compose up -d'
+                }
+            }
+        }
+
+        stage('7. Health Check') {
+            steps {
+                script {
+                    echo "Waiting for API to be healthy..."
+                    // Retries every 5 seconds for 1 minute
+                    sh '''
+                    count=0
+                    until $(curl --output /dev/null --silent --head --fail http://localhost:8000/health); do
+                        if [ $count -eq 12 ]; then
+                          echo "TIMEOUT: API failed to become healthy."
+                          exit 1
+                        fi
+                        printf '.'
+                        sleep 5
+                        count=$((count+1))
+                    done
+                    echo "✅ API is Healthy!"
+                    '''
+                }
+            }
+        }
+
+        stage('8. Smoke/API Test') {
+            steps {
+                script {
+                    echo "Running Smoke Test (Test Prediction)..."
+                    sh '''
+                    RESPONSE=$(curl -s -X POST "http://localhost:8000/predict" \
+                      -H "Content-Type: application/json" \
+                      -d '{
+                        "industry": "Software",
+                        "department": "Engineering",
+                        "ai_exposure": "Partial",
+                        "total_employees": 5000
+                      }')
+                    
+                    if echo "$RESPONSE" | grep -q "risk_probability"; then
+                        echo "✅ Smoke Test Passed: AI predicted successfully!"
+                        echo "Response: $RESPONSE"
+                    else
+                        echo "❌ Smoke Test Failed: Unexpected response."
+                        echo "Response: $RESPONSE"
+                        exit 1
+                    fi
+                    '''
+                }
+            }
+        }
+
+        stage('9. Cleanup') {
+            steps {
+                sh 'docker image prune -f'
             }
         }
     }
 
     post {
         success {
-            echo "✅ Pipeline Success! Code is healthy and model is updated."
+            echo "🏆 MISSION SUCCESS: Full MLOps Pipeline completed!"
         }
         failure {
-            echo "❌ Pipeline Failed. Please check the logs."
+            echo "⚠️ PIPELINE FAILED: Check stage logs for details."
         }
     }
 }
