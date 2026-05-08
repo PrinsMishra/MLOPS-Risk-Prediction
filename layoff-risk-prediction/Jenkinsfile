@@ -1,6 +1,11 @@
 pipeline {
     agent any
 
+    environment {
+        DOCKER_USER = 'prins05688'
+        DOCKER_CREDS = 'dockerhub-credentials'
+    }
+
     stages {
         stage('1. Checkout Code') {
             steps {
@@ -8,122 +13,99 @@ pipeline {
             }
         }
 
-        stage('2. Setup Python Environment') {
+        stage('2. MLOps Retrain & Validate') {
             steps {
                 dir('layoff-risk-prediction') {
-                    sh '''
-                    python3 -m venv venv || true
-                    . venv/bin/activate
-                    pip install -r requirements.txt
-                    '''
+                    script {
+                        echo "Running automated retraining and artifact validation..."
+                        sh '''
+                        python3 -m venv venv || true
+                        . venv/bin/activate
+                        pip install -r requirements.txt
+                        python scripts/retrain_pipeline.py --data mlops-dataset-layoff-risk/tech_layoffs_2025_2026.csv --models-dir models
+                        
+                        if [ ! -f "models/layoff_risk_model.keras" ]; then
+                            echo "❌ Model artifact missing!"
+                            exit 1
+                        fi
+                        '''
+                    }
                 }
             }
         }
 
-        stage('3. Retrain Model') {
+        stage('3. Build Docker Images') {
             steps {
                 dir('layoff-risk-prediction') {
-                    sh '''
-                    . venv/bin/activate
-                    python scripts/retrain_pipeline.py --data mlops-dataset-layoff-risk/tech_layoffs_2025_2026.csv --models-dir models
-                    '''
-                }
-            }
-        }
-
-        stage('4. Validate Model') {
-            steps {
-                dir('layoff-risk-prediction') {
-                    sh '''
-                    if [ -f "models/layoff_risk_model.keras" ]; then
-                        echo "✅ Model artifact found. Validation successful."
-                    else
-                        echo "❌ Model artifact missing!"
-                        exit 1
-                    fi
-                    '''
-                }
-            }
-        }
-
-        stage('5. Build Docker Images') {
-            steps {
-                dir('layoff-risk-prediction') {
+                    echo "Building images with production tags..."
                     sh 'docker-compose build'
                 }
             }
         }
 
-        stage('6. Deploy Containers') {
+        stage('4. Push to Docker Hub') {
+            steps {
+                script {
+                    echo "Authenticating and pushing images to Docker Hub..."
+                    withCredentials([usernamePassword(credentialsId: "${DOCKER_CREDS}", usernameVariable: 'USER', passwordVariable: 'PASS')]) {
+                        sh "echo \$PASS | docker login -u \$USER --password-stdin"
+                        sh "docker push ${DOCKER_USER}/careershield-backend:latest"
+                        sh "docker push ${DOCKER_USER}/careershield-frontend:latest"
+                    }
+                }
+            }
+        }
+
+        stage('5. Deploy & Smoke Test') {
             steps {
                 dir('layoff-risk-prediction') {
-                    sh 'docker-compose up -d'
-                }
-            }
-        }
-
-        stage('7. Health Check') {
-            steps {
-                script {
-                    echo "Waiting for API to be healthy..."
-                    // Retries every 5 seconds for 1 minute
-                    sh '''
-                    count=0
-                    until $(curl --output /dev/null --silent --fail http://localhost:8000/health); do
-                        if [ $count -eq 12 ]; then
-                          echo "TIMEOUT: API failed to become healthy."
-                          exit 1
+                    script {
+                        echo "Restarting services and running health checks..."
+                        sh 'docker-compose up -d'
+                        
+                        // Health check loop
+                        sh '''
+                        count=0
+                        until $(curl --output /dev/null --silent --fail http://localhost:8000/health); do
+                            if [ $count -eq 12 ]; then
+                                echo "TIMEOUT: API failed to become healthy."
+                                exit 1
+                            fi
+                            sleep 5
+                            count=$((count+1))
+                        done
+                        '''
+                        
+                        echo "Running Smoke Test..."
+                        sh '''
+                        RESPONSE=$(curl -s -X POST "http://localhost:8000/predict" \
+                          -H "Content-Type: application/json" \
+                          -d '{
+                            "industry": "Software",
+                            "department": "Engineering",
+                            "ai_exposure": "Partial",
+                            "total_employees": 5000
+                          }')
+                        
+                        if echo "$RESPONSE" | grep -q "risk_probability"; then
+                            echo "✅ Smoke Test Passed!"
+                        else
+                            echo "❌ Smoke Test Failed!"
+                            exit 1
                         fi
-                        printf '.'
-                        sleep 5
-                        count=$((count+1))
-                    done
-                    echo "✅ API is Healthy!"
-                    '''
+                        '''
+                    }
                 }
-            }
-        }
-
-        stage('8. Smoke/API Test') {
-            steps {
-                script {
-                    echo "Running Smoke Test (Test Prediction)..."
-                    sh '''
-                    RESPONSE=$(curl -s -X POST "http://localhost:8000/predict" \
-                      -H "Content-Type: application/json" \
-                      -d '{
-                        "industry": "Software",
-                        "department": "Engineering",
-                        "ai_exposure": "Partial",
-                        "total_employees": 5000
-                      }')
-                    
-                    if echo "$RESPONSE" | grep -q "risk_probability"; then
-                        echo "✅ Smoke Test Passed: AI predicted successfully!"
-                        echo "Response: $RESPONSE"
-                    else
-                        echo "❌ Smoke Test Failed: Unexpected response."
-                        echo "Response: $RESPONSE"
-                        exit 1
-                    fi
-                    '''
-                }
-            }
-        }
-
-        stage('9. Cleanup') {
-            steps {
-                sh 'docker image prune -f'
             }
         }
     }
 
     post {
-        success {
-            echo "🏆 MISSION SUCCESS: Full MLOps Pipeline completed!"
+        always {
+            sh 'docker image prune -f'
         }
-        failure {
-            echo "⚠️ PIPELINE FAILED: Check stage logs for details."
+        success {
+            echo "🏆 Full MLOps Automation Complete! Images pushed to Docker Hub."
         }
     }
 }
