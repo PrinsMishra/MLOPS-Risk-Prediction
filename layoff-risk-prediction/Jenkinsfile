@@ -65,7 +65,7 @@ pipeline {
                 dir('layoff-risk-prediction') {
                     script {
                         echo "Building images with Version: ${VERSION}"
-                        sh "docker build -t ${DOCKER_USER}/careershield-backend:${VERSION} -t ${DOCKER_USER}/careershield-backend:latest ./backend"
+                        sh "docker build -f backend/Dockerfile -t ${DOCKER_USER}/careershield-backend:${VERSION} -t ${DOCKER_USER}/careershield-backend:latest ."
                         sh "docker build -t ${DOCKER_USER}/careershield-frontend:${VERSION} -t ${DOCKER_USER}/careershield-frontend:latest ./frontend"
                     }
                 }
